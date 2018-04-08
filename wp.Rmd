@@ -1,0 +1,569 @@
+---
+output: html_document
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+```
+
+
+```{r, echo=FALSE, cache=TRUE}
+## LIBRARIES (install packages first)
+library(shiny)
+library(shinythemes)
+library(shinyjs)
+set.seed(123)
+```
+
+
+```{r, echo=FALSE, cache=TRUE}
+## DATA READ/PROCESSING
+g = read.csv("games.csv", as.is=T)
+h = read.csv("home.csv", as.is=T)
+a = read.csv("away.csv", as.is=T)
+h18 = read.csv("home2018.csv", as.is=T)
+a18 = read.csv("away2018.csv", as.is=T)
+g18 = read.csv("games2018.csv", as.is=T)
+
+# Remove unnecessary features
+h = h[,c(1:5,7:8,10)]
+a = a[,c(1:5,7:8,10)]
+h18 = h18[,c(1:5,7:8,10)]
+a18 = a18[,c(1:5,7:8,10)]
+```
+
+
+```{r echo=FALSE}
+## HELPER FUNCTIONS
+# Calculate accuracy of prediction of games for team in season
+calc_accuracy = function(games, x, tm, ind, tot) {
+  preds = predict(mod, newdata=x[ind,], type="response")
+  tot_right = 0
+  tot = 0
+  
+  for (i in 1:length(ind)) {
+    if (games[ind[i],]$away_score == -1) next
+    tot = tot + 1
+    if (games[ind[i],]$away == tm) {
+      preds[i] = 1 - preds[i]
+      if (games[ind[i],]$away_score > games[ind[i],]$home_score & preds[i] > 0.5) tot_right = tot_right + 1
+      if (games[ind[i],]$away_score < games[ind[i],]$home_score & preds[i] < 0.5) tot_right = tot_right + 1
+    } else {
+      if (games[ind[i],]$away_score > games[ind[i],]$home_score & preds[i] < 0.5) tot_right = tot_right + 1
+      if (games[ind[i],]$away_score < games[ind[i],]$home_score & preds[i] > 0.5) tot_right = tot_right + 1
+    }
+  }
+  return(paste(toString(round(100.0 * tot_right / tot, 0)), "%", sep=""))
+}
+
+# Calculate number of wins for team in season
+calc_wins = function(games, tm, ind) {
+  return(length(which(games[ind,]$away == tm & games[ind,]$away_score > games[ind,]$home_score)) + 
+         length(which(games[ind,]$home == tm & games[ind,]$home_score > games[ind,]$away_score)))
+}
+
+# Calculate expected number of wins for team in season based on win probability model
+calc_ewins = function(x, games, tm, ind) {
+  preds = predict(mod, newdata=x[ind,], type="response")
+  for (i in 1:length(ind)) {
+    if (games[ind[i],]$away == tm) preds[i] = 1 - preds[i]
+  }
+  return(sum(preds > 0.5))
+}
+
+# Calculate number of losses for team in season
+calc_losses = function(games, tm, ind) {
+  return(length(which(games[ind,]$away == tm & games[ind,]$away_score < games[ind,]$home_score)) + 
+         length(which(games[ind,]$home == tm & games[ind,]$home_score < games[ind,]$away_score)))  
+}
+
+# Converts date to mm/dd/yy format
+convert_date = function(day) {
+  return(paste(substr(day, 6, 7), '/', substr(day, 9, 10), '/', substr(day, 3, 4), sep=""))
+}
+
+# Grab win probabilities for a set of NBA games
+get_pred = function(d, ind) {
+  if (validate_data(d)) {
+    return(round(100 * predict(mod, newdata=X18[ind,], type="response")))
+  } else {
+    return(round(100 * predict(mod, newdata=X[ind,], type="response")))
+  }
+}
+
+# Extract NBA season for given date
+get_year = function(day) {
+  month = strtoi(ifelse(is.na(strtoi(substr(day, 1, 2))), substr(day, 2, 2), substr(day, 1, 2)))
+  year = strtoi(ifelse(is.na(strtoi(substr(day, 7, 8))), substr(day, 8, 8), substr(day, 7, 8)))
+  return(ifelse(month>9, year+2001, year+2000))
+}
+
+# Displays a game in the form of a table in the R Shiny app
+show_table = function(i, s, d) {
+  # Check if there are any more games needed to be displayed
+  if (length(s) < i) return()
+  
+  # Create table to be displayed
+  box = matrix(1:6, ncol=3, byrow = TRUE)
+  colnames(box) = c("Team", "Win%", "Score")
+  rownames(box) = c("Away", "Home")
+  
+  if (validate_data(d)) {
+    box[,1] = c(tm_names[[g18[s[i],2]]],tm_names[[g18[s[i],3]]])  # Team names
+    box[,2] = c(to_perc(100 - get_pred(d, s[i])), to_perc(get_pred(d, s[i]))) # Win probabilities
+    box[,3] = c(validate_score(g18[s[i],4]), validate_score(g18[s[i],5]))  # Score
+  } else {
+    box[,1] = c(tm_names[[g[s[i],2]]],tm_names[[g[s[i],3]]])
+    box[,2] = c(to_perc(100 - get_pred(d, s[i])), to_perc(get_pred(d, s[i])))
+    box[,3] = c(validate_score(g[s[i],4]), validate_score(g[s[i],5]))                 
+  }
+  
+  box  #Show table in app
+}
+
+# Appends "%" to the end of an integer
+to_perc = function(x) {
+  return(paste(toString(as.integer(x)), "%", sep=""))
+}
+
+# Checks if the given date is in the 2017-2018 NBA season
+validate_data = function(d) {
+    month = strtoi(substr(d, 1, 2))
+    year = ifelse(is.na(strtoi(substr(d, 7, 8))), strtoi(substr(d, 8, 8)), strtoi(substr(d, 7, 8)))
+    return(month >= 10 & year == 17 | year == 18)
+}
+
+# Checks if a game has been played yet and updates score accordingly
+validate_score = function(score) {
+  return(ifelse(score==-1, "", score))
+}
+```
+
+
+```{r, echo=FALSE}
+## CONSTANTS
+# Dictionary mapping team abbreviations to team names
+teams = c("Hawks", "Celtics", "Nets", "Bobcats", "Bulls", "Hornets", "Cavaliers", "Mavericks", 
+          "Nuggets", "Pistons", "Warriors", "Rockets", "Pacers", "Clippers", "Lakers",
+          "Grizzlies", "Heat", "Bucks", "T'wolves", "Nets", "Hornets", "Hornets", "Pelicans",
+          "Knicks", "Thunder", "Magic", "76ers", "Suns", "Blazers", "Kings", "Spurs",
+          "Supersonics", "Raptors", "Jazz", "Wizards")
+abbr = sort(unique(h$team))
+tm_names = vector(mode="list", length=length(abbr))
+names(tm_names) = abbr
+for (i in 1:length(abbr)) {
+  tm_names[[i]] = teams[i]
+}
+
+# Array keeping track of seasons
+years = apply(g[1], 2, get_year)
+
+
+## CONSTRUCT MODEL
+# Create response variable
+home_win = rep(0, nrow(g))
+home_win[g$home_score - g$away_score > 0] = 1
+
+# Create data frame for model
+n = nrow(g)
+n18 = nrow(g18)
+p = ncol(h)
+X = as.data.frame(matrix(0, n, 2*(p-2)))
+X18 = as.data.frame(matrix(0, n18, 2*(p-2)))
+
+for(i in 1:n) {
+  h_ind = which(h$year == years[i] & h$team == g[i,3])
+  a_ind = which(a$year == years[i] & a$team == g[i,2])
+  X[i,] = c(a[a_ind,3:p], h[h_ind,3:p])
+}
+
+for(i in 1:n18) {
+  h_ind = which(h18$team == g18[i,3])
+  a_ind = which(a18$team == g18[i,2])
+  X18[i,] = c(a18[a_ind,3:p], h18[h_ind,3:p])
+}
+
+# Break up into train and test sets
+ind = sample(1:nrow(g), size = 0.2*nrow(g))
+test = X[ind,]
+train = X[-ind,]
+y_test = home_win[ind]
+y_train = home_win[-ind]
+
+# Create logistic regression model
+mod = glm(y_train ~ ., data=train, family=binomial)
+```
+
+
+```{r echo=FALSE}
+## SHINY APP
+shinyApp(
+  ui = fixedPage(
+    useShinyjs(),   # Used for showing/hiding div's
+    fixedRow(h2("NBA Interactive Single-Game Win Probability Project")),    
+    fixedRow(p("Welcome to my interactive single-game win probability project! Here you will find
+               two view options: a box score view and a team page view. The box score view will 
+               allow you to view all the games for a given date, along with its corresponding win 
+               probabilities. The team page view provides you with an overview of a team's statistics
+               in a given season (as specified in the date input). This includes win-loss information,
+               home/road splits, and season box scores. You can toggle between views using the buttons
+               below. Enjoy!")),
+    fixedRow(
+        # Inputs
+        dateInput("date", "Select date:", value=convert_date(Sys.Date()), format = "mm/dd/yy",
+                  min="10/31/06", max="04/11/18"),
+        selectInput("team", label="Team:", choices=sort(teams), selected = NULL)
+      ),
+    # Buttons used to toggle between views
+    actionButton("teamTab", "Team page"),
+    actionButton("boxTab", "Box scores"),    
+    hidden(   # Team page hidden by default
+      div(id="split",
+          fixedRow(h3(textOutput("team_header"))),
+          fixedRow(p(textOutput("records"))),
+          fixedRow(p(textOutput("erecords"))),
+          fixedRow(p(textOutput("accuracy"))),
+          fixedRow(h4("Home/Road Splits")),
+          tableOutput("splits"),
+          fixedRow(h4("Season Box Scores")),
+          fixedRow(tableOutput("team_box"))
+        )
+    ),
+    # Box scores
+    div(id="box",
+        fixedRow(h3(textOutput("box_scores"))),
+        fixedRow(
+           column(width=4, tableOutput("tab1")),
+           column(width=4, tableOutput("tab2")),
+           column(width=4, tableOutput("tab3"))
+        ),
+        fixedRow(
+           column(width=4, tableOutput("tab4")),
+           column(width=4, tableOutput("tab5")),
+           column(width=4, tableOutput("tab6"))
+        ),
+        fixedRow(
+           column(width=4, tableOutput("tab7")),
+           column(width=4, tableOutput("tab8")),
+           column(width=4, tableOutput("tab9"))
+        ),      
+        fixedRow(
+           column(width=4, tableOutput("tab10")),
+           column(width=4, tableOutput("tab11")),
+           column(width=4, tableOutput("tab12"))
+        ),      
+        fixedRow(
+           column(width=4, tableOutput("tab13")),
+           column(width=4, tableOutput("tab14")),
+           column(width=4, tableOutput("tab15"))
+        )        
+      )
+    ),
+  server = function(input, output){
+    
+    # Get input date and convert it to desirable format.
+    gameday = reactive({
+      return(convert_date(as.character(input$date)))
+    })
+    
+    # Get current season based on given date
+    cur_season = reactive({
+      d = gameday()
+      return(get_year(d))
+    })
+    
+    # Get games that will be/were played on input date.
+    sched = reactive({
+      d = gameday()
+      if (validate_data(d)) {
+        return(which(g18$day == d))
+      } else {
+        return(which(g$day == d))
+      }
+    })
+    
+    get_team = reactive({
+      cur_season = cur_season()
+      team = names(tm_names)[which(tm_names == input$team)]
+      
+      # Hornets produces multiple results, so need check to narrow down which
+      # version of Hornets team to use
+      if (length(team) > 1) {
+        if (cur_season == 2014) return()
+        if (cur_season == 2007) {
+          team = "NOK"
+        } else if (cur_season >= 2015) {
+          team = "CHO"
+        } else {
+          team = "NOH"
+        }
+      }
+      
+      return(team)
+    })
+    
+    
+    # Watches to flip between pages
+    observeEvent(input$teamTab, {
+      hide("box")
+      show("split")
+    })
+    observeEvent(input$boxTab, {
+      show("box")
+      hide("split")
+    })    
+    
+    # Text outputs for team page
+    output$team_header <- renderText({
+      year = cur_season()
+      paste(input$team, " ", toString(year-1), "-", toString(year), " Team Page", sep="")
+    })
+    
+    # Get win-loss record for team
+    output$records <- renderText({
+      cur_season = cur_season()
+      team = get_team()
+      
+      if (cur_season == 2018) {
+        ind = which(g18$away == team | g18$home == team)
+        if (length(ind) == 0) return()
+        w = calc_wins(g18, team, ind)
+        l = calc_losses(g18, team, ind)
+        paste("Current record: ", toString(w), "-", toString(l), sep="")
+      } else {
+        ind = which((g$away == team | g$home == team) & years == cur_season)
+        if (length(ind) == 0) return()
+        w = calc_wins(g, team, ind)
+        l = 82 - w
+        paste("Record: ", toString(w), "-", toString(l), sep="")        
+      }
+    })
+    
+    # Get expected win-loss record for team based on win probabilities
+    output$erecords <- renderText({
+      cur_season = cur_season()
+      team = get_team()
+      
+      if (cur_season == 2018) {
+        ind = which(g18$away == team | g18$home == team)
+        if (length(ind) == 0) return()
+        ew = calc_ewins(X18, g18, team, ind)
+        el = 82 - ew
+        paste("Expected record: ", toString(ew), "-", toString(el), sep="")
+      } else {
+        ind = which((g$away == team | g$home == team) & years == cur_season)
+        if (length(ind) == 0) return()
+        ew = calc_ewins(X, g, team, ind)
+        el = 82 - ew
+        paste("Expected record: ", toString(ew), "-", toString(el), sep="")        
+      }      
+    })
+    
+    # Get accuracy of win probability model for team in season
+    output$accuracy <- renderText({
+      cur_season = cur_season()
+      team = get_team()
+      tot_right = 0
+      
+      if (cur_season == 2018) {
+        ind = which(g18$away == team | g18$home == team)
+        if (length(ind) == 0) return()
+        paste("Accuracy:", calc_accuracy(g18, X18, team, ind))
+      } else {
+        ind = which((g$away == team | g$home == team) & years == cur_season)
+        if (length(ind) == 0) return()
+        paste("Accuracy:", calc_accuracy(g, X, team, ind))      
+      }       
+    })
+    
+    # Get home/road splits for current team
+    output$splits <- renderTable({
+      cur_season = cur_season()
+      team = get_team()
+      
+      # Initialize table to be displayed
+      tab = matrix(1:14, ncol=7, byrow=TRUE)
+      tab[,1] = c("Home", "Away")
+      colnames(tab) = c("Split", "Win%", "3P%", "TS%", "AST", "oEFG%", "MOV")
+      
+      if (cur_season == 2018) {
+        # Get games played by team in season
+        hsplit = h18[which(h18$team == team & h18$year == cur_season),3:8]
+        asplit = a18[which(a18$team == team & a18$year == cur_season),3:8]
+        for (i in 2:7) {  # Transfer data into displayed table
+          tab[1,i] = ifelse(i == 5 | i == 7, hsplit[1,i-1], 100 * hsplit[1,i-1])
+          tab[2,i] = ifelse(i == 5 | i == 7, asplit[1,i-1], 100 * asplit[1,i-1])
+        }
+        tab   # Display table
+      } else {
+        hsplit = h[which(h$team == team & h$year == cur_season),3:8]
+        asplit = a[which(a$team == team & a$year == cur_season),3:8]
+        for (i in 2:7) {
+          tab[1,i] = ifelse(i == 5 | i == 7, hsplit[1,i-1], 100 * hsplit[1,i-1])
+          tab[2,i] = ifelse(i == 5 | i == 7, asplit[1,i-1], 100 * asplit[1,i-1])
+        }
+        tab
+      }
+    })
+    
+    # Displays text for box scores
+    output$box_scores <- renderText({
+      d = gameday()
+      months = c("January", "February", "March", "April", "May", "June", "July", "August",
+                 "September", "October", "November", "December")
+      month = months[strtoi(substr(d, 1, 2))]
+      year = ifelse(is.na(strtoi(substr(d, 7, 8))), strtoi(substr(d, 8, 8)), strtoi(substr(d, 7, 8)))
+      paste("Box scores for", month, substr(d, 4, 5), toString(2000 + year))
+    })
+    
+    # Displays game-by-game box scores for current team
+    output$team_box <- renderTable({
+      d = gameday()
+      cur_season = cur_season()
+      team = get_team()
+      
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      
+      if (cur_season == 2018) {
+        ind = which(g18$away == team | g18$home == team)
+        if (length(ind) == 0) return()
+        
+        # Create table to be displayed
+        tab = cbind(g18[ind,], get_pred(d, ind))
+        colnames(tab)[6] = paste(input$team, "Win%")
+        
+        # Update probabilities for away games and convert to percents
+        tab[which(tab$away == team),6] = 100 - tab[which(tab$away == team),6]
+        for (i in 1:length(ind)) {
+          tab[i,6] = to_perc(tab[i,6])
+        }
+        tab[which(tab$home_score == -1),c(4,5)] = ""  # Clean table
+        
+        tab   # Display table
+      } else {
+        ind = which((g$away == team | g$home == team) & years == cur_season)
+        if (length(ind) == 0) return()
+        
+        tab = cbind(g[ind,], get_pred(d, ind))
+        colnames(tab)[6] = paste(input$team, "Win%")
+        
+        tab[which(tab$away == team),6] = 100 - tab[which(tab$away == team),6]
+        for (i in 1:length(ind)) {
+          tab[i,6] = to_perc(tab[i,6])
+        }
+        
+        tab
+      }
+    })
+    
+    # Display box scores
+    output$tab1 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(1, s, d)
+    })
+    
+    output$tab2 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(2, s, d)
+    })   
+    
+    output$tab3 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(3, s, d) 
+    }) 
+    
+    output$tab4 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(4, s, d)
+    }) 
+    
+    output$tab5 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(5, s, d)
+    })     
+    
+    output$tab6 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(6, s, d)
+    }) 
+    
+    output$tab7 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(7, s, d)
+    }) 
+    
+    output$tab8 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(8, s, d)
+    }) 
+    
+    output$tab9 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(9, s, d)
+    }) 
+    
+    output$tab10 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(10, s, d)
+    }) 
+    
+    output$tab11 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(11, s, d)
+    }) 
+    
+    output$tab12 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(12, s, d)
+    }) 
+    
+    output$tab13 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(13, s, d)
+    }) 
+    
+    output$tab14 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(14, s, d)
+    })     
+    
+    output$tab15 <- renderTable({
+      s = sched()
+      d = gameday()
+      if (length(which(g$day == d)) == 0 & length(which(g18$day == d)) == 0) return()
+      show_table(15, s, d)
+    })         
+  }
+)
+```
+
+
